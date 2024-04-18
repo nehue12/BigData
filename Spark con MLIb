@@ -1,0 +1,215 @@
+# Instalamos Apache Spark con Hadoop
+!wget -q https://downloads.apache.org/spark/spark-3.5.1/spark-3.5.1-bin-hadoop3.tgz
+!tar xf spark-3.5.1-bin-hadoop3.tgz
+
+# Utilizamos pip para instalar los paquetes de Python para trabajar con Spark
+!pip install findspark # FindSpark
+!pip install pyspark   # Spark
+
+#Inicializamos las variables de entorno con sus valores correspondientes
+import os
+os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-amd64"
+os.environ["SPARK_HOME"] = "/content/spark-3.5.1-bin-hadoop3"
+
+#Indicamos a PySpark donde está Spark (variable de entorno)
+import findspark
+findspark.init()#SPARK_HOME
+
+#Creamos una sesión de Spark para poder comenzar
+from pyspark.sql import SparkSession
+spark = SparkSession.builder \
+    .master("local[*]") \
+    .appName("Ejemplo Machine Learning PySpark") \
+    .config("spark.sql.execution.arrow.enabled", "true") \
+    .getOrCreate()
+
+#Nos descargamos los ficheros de datos en Google Colaboratory 
+!gdown --id '1xnz8qqmzC6h-B0Z0AzRI2RxRMvcwthbS' -O input_X.csv
+!gdown --id '1WXIYAWovVloWkxB-zuMSTY2ejpaz4-Hd' -O output_Y.csv
+
+#Vamos a mostrar la cabecera de los ficheros y dos filas, para comprobar
+#que se han bajado correctamente.
+!head -3 input_X.csv
+!head -3 output_Y.csv
+
+#Leemos el fichero con las variables de entrada
+dfX = spark.read.csv('input_X.csv',inferSchema=True, header=True, sep=';')
+#Leemos el fichero con la variable de salida
+dfY = spark.read.csv('output_Y.csv',inferSchema=True, header=True, sep=';')
+
+#Unimos los dos DataFrame
+#df=dfX.join(dfY, dfX._c0 == dfY._c0).drop('_c0')
+df=dfX.join(dfY).drop('encounter_id', 'patient_id', '_c1')
+
+#Eliminamos la columna que indica el número de instancia
+dfX=dfX.drop('encounter_id', 'patient_id', '_c1')
+dfY=dfY.drop('encounter_id', 'patient_id', '_c1')
+
+#Preprocesamos los datos para ser utilizados en un algoritmo de ML
+from pyspark.ml.feature import StringIndexer
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.feature import OneHotEncoder
+from pyspark.sql.functions import col
+
+from pyspark.ml import Pipeline
+
+#Indexamos todas las variables de entrada que tienen algún string
+indexada = StringIndexer(inputCol="ethnicity", outputCol="ethnicity_index").fit(df).transform(df)
+indexada2 = StringIndexer(inputCol="gender", outputCol="gender_index").fit(indexada).transform(indexada)
+indexada3 = StringIndexer(inputCol="icu_admit_source", outputCol="icu_admit_source_index").fit(indexada2).transform(indexada2)
+indexada4 = StringIndexer(inputCol="icu_stay_type", outputCol="icu_stay_type_index").fit(indexada3).transform(indexada3)
+indexada5 = StringIndexer(inputCol="icu_type", outputCol="icu_type_index").fit(indexada4).transform(indexada4)
+indexada6 = StringIndexer(inputCol="apache_3j_bodysystem", outputCol="apache_3j_bodysystem_index").fit(indexada5).transform(indexada5)
+indexada7 = StringIndexer(inputCol="apache_2_bodysystem", outputCol="apache_2_bodysystem_index").fit(indexada6).transform(indexada6)
+
+#Borramos columnas originales
+indexada8 = indexada7.drop("ethnicity", "gender", "icu_admit_source", "icu_stay_type", "icu_type", "apache_3j_bodysystem", "apache_2_bodysystem")
+dfOut = indexada8.withColumnRenamed("ethnicity_index", "ethnicity")\
+              .withColumnRenamed("gender_index", "gender")\
+              .withColumnRenamed("icu_admit_source_index", "icu_admit_source")\
+              .withColumnRenamed("icu_stay_type_index", "icu_stay_type")\
+              .withColumnRenamed("icu_type_index", "icu_type")\
+              .withColumnRenamed("apache_3j_bodysystem_index", "apache_3j_bodysystem")\
+              .withColumnRenamed("apache_2_bodysystem_index", "apache_2_bodysystem")
+
+dfOut.show(15)
+
+#Unimos las variables de entrada con VectorAssembler
+assembler = VectorAssembler(inputCols=dfX.columns,outputCol="atributos")
+datos = assembler.transform(dfOut)
+datos.select('atributos','hospital_death').show(5)
+
+# Metemos en un array los nombres de columnas con datos categóricos
+categoricalCols = ['ethnicity', 'gender', 'icu_admit_source', 'icu_stay_type', 'icu_type', 'apache_3j_bodysystem', 'apache_2_bodysystem']
+
+# El resto de columnas tienen datos numéricos, por lo tanto, no hay que pasarles el StringIndexer
+continuousCols = [i for i in dfX.columns if i not in categoricalCols]
+
+# Generamos nuestro array de indexers, los cuales formarán parte del pipeline
+indexers = [ StringIndexer(inputCol=c, outputCol="{0}_indexed".format(c), handleInvalid="skip")
+                 for c in categoricalCols ]
+
+# Hacemos one-hot encoding con las columnas categorizadas previamente (mejora la eficiencia en la ejecución de Spark)
+encoders = [ OneHotEncoder(inputCol=indexer.getOutputCol(),
+              outputCol="{0}_encoded".format(indexer.getOutputCol()))
+              for indexer in indexers ]
+
+# Por último usamos el assembler para unir datos de entrada en una columna (atributos) y la salida en otra columna distinta (hospital_death)
+assembler = VectorAssembler(inputCols=[encoder.getOutputCol() for encoder in encoders]
+                            + continuousCols, outputCol="atributos", handleInvalid="skip")
+
+# Adosamos todas las estapas del pipeline
+pipeline = Pipeline(stages=indexers + encoders + [assembler])
+
+# Aplicamos el pipeline al dataframe de datos generado y lo transformamos
+model=pipeline.fit(df)
+data = model.transform(df)
+
+# Mostramos cómo ha quedado el dataframe tras hacerlo pasar por el pipeline
+data.select('atributos','hospital_death').show(5)
+
+train, test = data.select('atributos','hospital_death').randomSplit([0.7, 0.3], seed = 2020)
+print("DataFrame Entrenamiento: " + str(train.count())+" instancias.")
+print("DataFrame Test: " + str(test.count())+" instancias.")
+
+from pyspark.ml.classification import LogisticRegression
+#Aprendemos el Modelo de Regresión Logística
+lr = LogisticRegression(featuresCol = 'atributos', labelCol = 'hospital_death', maxIter=10)
+lrModel = lr.fit(train)
+
+#Obtenemos las predicciones sobre el conjunto de test
+predicciones = lrModel.transform(test)
+
+#Ya podemos mostrar la precisión del modelo
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+evaluador = MulticlassClassificationEvaluator(labelCol="hospital_death", metricName="accuracy")
+print('Accuracy:', evaluador.evaluate(predicciones))
+
+#Partimos los datos (sin preprocesar)
+train, test = df.randomSplit([0.7, 0.3], seed = 2020)
+
+# Metemos en un array los nombres de columnas con datos categóricos
+categoricalCols = ['ethnicity', 'gender', 'icu_admit_source', 'icu_stay_type', 'icu_type', 'apache_3j_bodysystem', 'apache_2_bodysystem']
+
+# El resto de columnas tienen datos numéricos, por lo tanto, no hay que pasarles el StringIndexer
+continuousCols = [i for i in dfX.columns if i not in categoricalCols]
+
+# Generamos nuestro array de indexers, los cuales formarán parte del pipeline
+indexers = [ StringIndexer(inputCol=c, outputCol="{0}_indexed".format(c), handleInvalid="skip")
+                 for c in categoricalCols ]
+
+# Hacemos one-hot encoding con las columnas categorizadas previamente (mejora la eficiencia en la ejecución de Spark)
+encoders = [ OneHotEncoder(inputCol=indexer.getOutputCol(),
+              outputCol="{0}_encoded".format(indexer.getOutputCol()))
+              for indexer in indexers ]
+
+# Por último usamos el assembler para unir datos de entrada en una columna (atributos) y la salida en otra columna distinta (hospital_death)
+assembler = VectorAssembler(inputCols=[encoder.getOutputCol() for encoder in encoders]
+                            + continuousCols, outputCol="atributos", handleInvalid="skip")
+
+#Incorporamos el modelo de regresión logística
+lr = LogisticRegression(featuresCol = 'atributos', labelCol = 'hospital_death', maxIter=10)
+
+modeloRL = Pipeline(stages=indexers + encoders + [assembler] + [lr])
+
+#Construimos el modelo: preprocesamiento + regresión logística
+clasificador = modeloRL.fit(train)
+
+#Obtenemos las predicciones sobre el conjunto de test
+predicciones = clasificador.transform(test)
+
+#Ya podemos mostrar la precisión del modelo
+evaluator = MulticlassClassificationEvaluator(labelCol="hospital_death", metricName="accuracy")
+print('Accuracy:', evaluator.evaluate(predicciones))
+
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+
+#Ya podemos mostrar la bondad de las predicciones del modelo
+evaluator = BinaryClassificationEvaluator(labelCol="hospital_death", metricName="areaUnderROC")
+print('ROC AUC:', evaluator.evaluate(predicciones))
+
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+
+#Ya podemos mostrar la bondad de las predicciones del modelo multiclase
+evaluator = MulticlassClassificationEvaluator(labelCol="hospital_death")
+print('F1:', evaluator.evaluate(predicciones))
+print('Accuracy:', evaluator.evaluate(predicciones, {evaluator.metricName: "accuracy"}))
+print('Weighted Precision:', evaluator.evaluate(predicciones, {evaluator.metricName: "weightedPrecision"}))
+print('Weighted Recall:', evaluator.evaluate(predicciones, {evaluator.metricName: "weightedRecall"}))
+
+from pyspark.ml.evaluation import RegressionEvaluator
+
+#Ya podemos mostrar la bondad de las predicciones del modelo multiclase
+evaluator = RegressionEvaluator(labelCol="hospital_death")
+print('rmse:', evaluator.evaluate(predicciones))
+print('r2:', evaluator.evaluate(predicciones, {evaluator.metricName: "r2"}))
+
+from pyspark.ml.tuning import TrainValidationSplit, ParamGridBuilder
+
+#Creamos una clase Evaluador
+evaluador = MulticlassClassificationEvaluator(labelCol="hospital_death", metricName="accuracy")
+
+#Usamos la regresión logística para ser evaluada 
+validadorTT= TrainValidationSplit(estimator=modeloRL,
+                           estimatorParamMaps=ParamGridBuilder().build(),
+                           evaluator=evaluador,
+                           trainRatio=0.8) # 80% de los datos para entrenamiento
+validadorTT.setSeed(2020)
+#Entrenamos el modelo con el conjunto completo de datos
+modeloTT=validadorTT.fit(df)
+
+#Mostramos la precisión del modelo
+print(modeloTT.getEvaluator().getMetricName(), ':',modeloTT.validationMetrics[0] )
+
+from pyspark.ml.tuning import CrossValidator
+
+#Validación cruzada
+crossval = CrossValidator(estimator=modeloRL,
+                          estimatorParamMaps=ParamGridBuilder().build(),
+                          evaluator=evaluador,
+                          numFolds=10) 
+#Entrenamos el modelo
+cvModel=crossval.fit(df)
+
+#Ya podemos mostrar la precisión del modelo
+print(cvModel.getEvaluator().getMetricName(), ':',cvModel.avgMetrics[0])
