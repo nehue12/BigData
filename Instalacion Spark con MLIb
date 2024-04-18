@@ -1,0 +1,24 @@
+# Instalamos Apache Spark con Hadoop
+!wget -q https://downloads.apache.org/spark/spark-3.5.1/spark-3.5.1-bin-hadoop3.tgz
+!tar xf spark-3.5.1-bin-hadoop3.tgz
+
+# Utilizamos pip para instalar los paquetes de Python para trabajar con Spark
+!pip install findspark # FindSpark
+!pip install pyspark   # Spark
+
+#Inicializamos las variables de entorno con sus valores correspondientes
+import os
+os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-amd64"
+os.environ["SPARK_HOME"] = "/content/spark-3.5.1-bin-hadoop3"
+
+#Indicamos a PySpark donde está Spark (variable de entorno)
+import findspark
+findspark.init()#SPARK_HOME
+
+#Creamos una sesión de Spark para poder comenzar
+from pyspark.sql import SparkSession
+spark = SparkSession.builder \
+    .master("local[*]") \
+    .appName("Ejemplo Machine Learning PySpark") \
+    .config("spark.sql.execution.arrow.enabled", "true") \
+    .getOrCreate()
